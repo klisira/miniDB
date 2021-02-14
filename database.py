@@ -7,6 +7,7 @@ from btree import Btree
 import shutil
 from misc import split_condition
 
+
 class Database:
     '''
     Database class contains tables.
@@ -37,13 +38,12 @@ class Database:
             pass
 
         # create all the meta tables
-        self.create_table('meta_length',  ['table_name', 'no_of_rows'], [str, int])
-        self.create_table('meta_locks',  ['table_name', 'locked'], [str, bool])
-        self.create_table('meta_insert_stack',  ['table_name', 'indexes'], [str, list])
-        self.create_table('meta_indexes',  ['table_name', 'index_name'], [str, str])
+        self.create_table('meta_length', ['table_name', 'no_of_rows'], [str, int])
+        self.create_table('meta_locks', ['table_name', 'exclusive', 'shared', 'rowX', 'rowS'],
+                          [str, bool, int, dict, dict])
+        self.create_table('meta_insert_stack', ['table_name', 'indexes'], [str, list])
+        self.create_table('meta_indexes', ['table_name', 'index_name'], [str, str])
         self.save()
-
-
 
     def save(self):
         '''
@@ -66,9 +66,9 @@ class Database:
         '''
         for file in os.listdir(path):
 
-            if file[-3:]!='pkl': # if used to load only pkl files
+            if file[-3:] != 'pkl':  # if used to load only pkl files
                 continue
-            f = open(path+'/'+file, 'rb')
+            f = open(path + '/' + file, 'rb')
             tmp_dict = pickle.load(f)
             f.close()
             name = f'{file.split(".")[0]}'
@@ -88,7 +88,6 @@ class Database:
         self._update_meta_locks()
         self._update_meta_insert_stack()
 
-
     def create_table(self, name=None, column_names=None, column_types=None, primary_key=None, load=None):
         '''
         This method create a new table. This table is saved and can be accessed by
@@ -96,7 +95,8 @@ class Database:
         or
         db_object.table_name
         '''
-        self.tables.update({name: Table(name=name, column_names=column_names, column_types=column_types, primary_key=primary_key, load=load)})
+        self.tables.update({name: Table(name=name, column_names=column_names, column_types=column_types,
+                                        primary_key=primary_key, load=load)})
         # self._name = Table(name=name, column_names=column_names, column_types=column_types, load=load)
         # check that new dynamic var doesnt exist already
         if name not in self.__dir__():
@@ -108,13 +108,12 @@ class Database:
         self._update()
         self.save()
 
-
     def drop_table(self, table_name):
         '''
         Drop table with name 'table_name' from current db
         '''
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_locked(table_name, 'shared') or self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X') or self.is_locked(table_name, 'locked_row_S'):
             return
 
         self.tables.pop(table_name)
@@ -130,7 +129,6 @@ class Database:
         # self._update()
         self.save()
 
-
     def table_from_csv(self, filename, name=None, column_types=None, primary_key=None):
         '''
         Create a table from a csv file.
@@ -138,12 +136,11 @@ class Database:
         If column types are not specified, all are regarded to be of type str
         '''
         if name is None:
-            name=filename.split('.')[:-1][0]
-
+            name = filename.split('.')[:-1][0]
 
         file = open(filename, 'r')
 
-        first_line=True
+        first_line = True
         for line in file.readlines():
             if first_line:
                 colnames = line.strip('\n').split(',')
@@ -155,21 +152,20 @@ class Database:
                 continue
             self.tables[name]._insert(line.strip('\n').split(','))
 
-        self.unlock_table(name)
+        self.unlock_table(name, 'exclusive')
         self._update()
         self.save()
 
-
     def table_to_csv(self, table_name, filename=None):
         res = ''
-        for row in [self.tables[table_name].column_names]+self.tables[table_name].data:
-            res+=str(row)[1:-1].replace('\'', '').replace('"','').replace(' ','')+'\n'
+        for row in [self.tables[table_name].column_names] + self.tables[table_name].data:
+            res += str(row)[1:-1].replace('\'', '').replace('"', '').replace(' ', '') + '\n'
 
         if filename is None:
             filename = f'{table_name}.csv'
 
         with open(filename, 'w') as file:
-           file.write(res)
+            file.write(res)
 
     def table_from_object(self, new_table):
         '''
@@ -184,13 +180,11 @@ class Database:
         self._update()
         self.save()
 
-
-
     ##### table functions #####
 
     # In every table function a load command is executed to fetch the most recent table.
-    # In every table function, we first check whether the table is locked. Since we have implemented
-    # only the X lock, if the tables is locked we always abort.
+    # In every table function, we first check whether the table is locked or a row from that table is locked.
+    # If the tables is locked we always abort.
     # After every table function, we update and save. Update updates all the meta tables and save saves all
     # tables.
 
@@ -206,11 +200,11 @@ class Database:
         cast_type -> needs to be a python type like str int etc. NOT in ''
         '''
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_locked(table_name, 'shared') or self.is_locked(table_name, 'exclusive'):
             return
         self.lockX_table(table_name)
         self.tables[table_name]._cast_column(column_name, cast_type)
-        self.unlock_table(table_name)
+        self.unlock_table(table_name, 'exclusive')
         self._update()
         self.save()
 
@@ -224,7 +218,7 @@ class Database:
         '''
         if lock_load_save:
             self.load(self.savedir)
-            if self.is_locked(table_name):
+            if self.is_locked(table_name, 'shared') or self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X') or self.is_locked(table_name, 'row_locked_S'):
                 return
             # fetch the insert_stack. For more info on the insert_stack
             # check the insert_stack meta table
@@ -238,10 +232,9 @@ class Database:
         # sleep(2)
         self._update_meta_insert_stack_for_tb(table_name, insert_stack[:-1])
         if lock_load_save:
-            self.unlock_table(table_name)
+            self.unlock_table(table_name, 'exclusive')
             self._update()
             self.save()
-
 
     def update(self, table_name, set_value, set_column, condition):
         '''
@@ -257,11 +250,11 @@ class Database:
                     operatores supported -> (<,<=,==,>=,>)
         '''
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_locked(table_name, 'shared') or self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X') or self.is_locked(table_name, 'row_locked_S'):
             return
         self.lockX_table(table_name)
         self.tables[table_name]._update_row(set_value, set_column, condition)
-        self.unlock_table(table_name)
+        self.unlock_table(table_name, 'exclusive')
         self._update()
         self.save()
 
@@ -277,19 +270,19 @@ class Database:
                     operatores supported -> (<,<=,==,>=,>)
         '''
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_locked(table_name, 'shared') or self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X') or self.is_locked(table_name, 'row_locked_S'):
             return
         self.lockX_table(table_name)
         deleted = self.tables[table_name]._delete_where(condition)
-        self.unlock_table(table_name)
+        self.unlock_table(table_name, 'exclusive')
         self._update()
         self.save()
         # we need the save above to avoid loading the old database that still contains the deleted elements
-        if table_name[:4]!='meta':
+        if table_name[:4] != 'meta':
             self._add_to_insert_stack(table_name, deleted)
         self.save()
 
-    def select(self, table_name, columns, condition=None, order_by=None, asc=False,\
+    def select(self, table_name, columns, condition=None, order_by=None, asc=False, \
                top_k=None, save_as=None, return_object=False):
         '''
         Selects and outputs a table's data where condtion is met.
@@ -309,18 +302,19 @@ class Database:
 
         '''
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X'):
             return
-        self.lockX_table(table_name)
+        self.lockS_table(table_name)
         if condition is not None:
             condition_column = split_condition(condition)[0]
-        if self._has_index(table_name) and condition_column==self.tables[table_name].column_names[self.tables[table_name].pk_idx]:
+        if self._has_index(table_name) and condition_column == self.tables[table_name].column_names[
+            self.tables[table_name].pk_idx]:
             index_name = self.select('meta_indexes', '*', f'table_name=={table_name}', return_object=True).index_name[0]
             bt = self._load_idx(index_name)
             table = self.tables[table_name]._select_where_with_btree(columns, bt, condition, order_by, asc, top_k)
         else:
             table = self.tables[table_name]._select_where(columns, condition, order_by, asc, top_k)
-        self.unlock_table(table_name)
+        self.unlock_table(table_name, 'shared')
         if save_as is not None:
             table._name = save_as
             self.table_from_object(table)
@@ -337,9 +331,9 @@ class Database:
         table_name -> table's name (needs to exist in database)
         '''
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X'):
             return
-        self.tables[table_name].show(no_of_rows, self.is_locked(table_name))
+        self.tables[table_name].show(no_of_rows, self.is_locked(table_name, 'exclusive'))
 
     def sort(self, table_name, column_name, asc=False):
         '''
@@ -351,11 +345,11 @@ class Database:
         '''
 
         self.load(self.savedir)
-        if self.is_locked(table_name):
+        if self.is_locked(table_name, 'shared') or self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X') or self.is_locked(table_name, 'row_locked_S'):
             return
         self.lockX_table(table_name)
         self.tables[table_name]._sort(column_name, asc=asc)
-        self.unlock_table(table_name)
+        self.unlock_table(table_name, 'exclusive')
         self._update()
         self.save()
 
@@ -373,7 +367,7 @@ class Database:
         return_object -> If true, the result will be a table object (usefull for internal usage). Def: False (the result will be printed)
         '''
         self.load(self.savedir)
-        if self.is_locked(left_table_name) or self.is_locked(right_table_name):
+        if self.is_locked(left_table_name, 'exclusive') or self.is_locked(right_table_name,'exclusive') or self.is_locked(left_table_name, 'row_locked_X') or self.is_locked(right_table_name, 'row_locked_X'):
             print(f'Table/Tables are currently locked')
             return
 
@@ -392,31 +386,171 @@ class Database:
         Locks the specified table using the exclusive lock (X)
 
         table_name -> table's name (needs to exist in database)
+        If an exclusive/shared table lock or an exlusive/shared row lock exists, the table cannot be locked at all
+        A table may only have one exclusive lock at a time
         '''
-        if table_name[:4]=='meta':
+        if table_name[:4] == 'meta':
             return
 
-        self.tables['meta_locks']._update_row(True, 'locked', f'table_name=={table_name}')
+        if self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'shared') or self.is_locked(table_name, 'row_locked_X') or self.is_locked(table_name, 'row_locked_S'):
+            return
+
+        self.tables['meta_locks']._update_row(True, 'exclusive', f'table_name=={table_name}')
         self._save_locks()
         # print(f'Locking table "{table_name}"')
 
-    def unlock_table(self, table_name):
+    def lockS_table(self, table_name):
         '''
-        Unlocks the specified table that is exclusivelly locked (X)
+        Locks the specified table using the shared lock (S)
 
         table_name -> table's name (needs to exist in database)
+        If an exclusive table lock or an exclusive row lock of the table exists, the table cannot be read
+        Multiple shared locks can coexist in the table
         '''
-        self.tables['meta_locks']._update_row(False, 'locked', f'table_name=={table_name}')
+        if table_name[:4] == 'meta':
+            return
+        # if table/row is locked(X) return..
+        if self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'row_locked_X'):
+            return
+        # shared_number is like a counter for how many shared locks exists in the table..
+        # using the lockS_table , increments the column 'shared' of the talbe 'meta_locks' by one.
+        # That means another read process occurs in the table.
+        shared_number = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').shared[0]
+        self.tables['meta_locks']._update_row(shared_number + 1, 'shared', f'table_name=={table_name}')
+        self._save_locks()
+
+    def lockX_row(self, table_name, index):
+        '''
+        Locks the specified row(with the help of the parameter 'index') using the exclusive lock (X)
+
+        table_name -> table's name (needs to exist in database)
+        If an exclusive/shared table wide lock or shared row wide lock exists, the row cannot be locked at all
+        A row may only have one exclusive lock at a time
+        '''
+        if table_name[:4] == 'meta':
+            return
+
+        if self.is_locked(table_name, 'exclusive') or self.is_locked(table_name, 'shared') or self.is_same_row(table_name, 'S', index):
+            return
+        # if the row to be locked is not in the meta_locks dictionary for the exclusively locked rows,
+        # it is appended in the dictionary with the value 'True'
+        rowX = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowX[0]
+        # We don't need to use the update_row function here because dictionaries are mutable.
+        rowX.setdefault(index, True)
+
+        self._save_locks()
+
+    def lockS_row(self, table_name, index):
+        '''
+        Locks the specified row(with the help of the 'index' parameter) using the shared lock (S)
+
+        table_name -> table's name (needs to exist in database)
+        If an exclusive table lock or an exclusive row lock(at the specified row) exists, the row cannot be read
+        Multiple shared locks can coexist in the row
+        '''
+        if table_name[:4] == 'meta':
+            return
+
+        if self.is_locked(table_name, 'exclusive') or self.is_same_row(table_name, 'X', index):
+            return
+        # Same as the lockS_table fucntion but with a dictionary
+        # if the row to be shared locked isn't already in the dictionary, append it with value 1
+        rowS = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowS[0]
+        if index not in rowS:
+            rowS.setdefault(index, 1)
+        else:
+            # else another lock(S) occurs on the row
+            rowS[index] += 1
+
+        self._save_locks()
+
+    def is_same_row(self, table_name, lock_type, index):
+        '''
+        Checks if the row already has a lock.
+
+        lock type -> the type of the lock for the raw (X), (S)
+        index -> the row to check
+
+        for example: if an exclusive lock exist on row '3' of the table 'students'
+                     no shared lock can be assigned at the position 3..
+        '''
+        if table_name[:4] == 'meta':  # meta tables will never be locked (they are internal)
+            return False
+
+        with open(f'{self.savedir}/meta_locks.pkl', 'rb') as f:
+            self.tables.update({'meta_locks': pickle.load(f)})
+            self.meta_locks = self.tables['meta_locks']
+
+        rowS = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowS[0]
+        rowX = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowX[0]
+
+        if lock_type == 'S' and index in rowS:
+            print(f"A shared lock already exists on row {index}.")
+            return True
+        if lock_type == 'X' and index in rowX:
+            print(f"An exclusive lock already exists on row {index}.")
+            return True
+
+    def unlock_table(self, table_name, lock_type):
+        '''
+        Unlocks the specified table that is exclusively locked (X) or shared locked (S)
+
+        table_name -> table's name (needs to exist in database)
+        lock_type -> checks for the lock type of the table
+        '''
+        if lock_type == 'exclusive':
+            self.tables['meta_locks']._update_row(False, 'exclusive', f'table_name=={table_name}')
+        elif lock_type == 'shared':
+            # gets the shared column from meta locks and appends its value to shared_number
+            shared_number = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').shared[0]
+            # if shared number equals '0', that means  shared locks don't exist in the table
+            if shared_number == 0:
+                print("No shared locks found")
+                return
+            # else the number of shared locks on the table is decremented by one.
+            self.tables['meta_locks']._update_row(shared_number - 1, 'shared', f'table_name=={table_name}')
         self._save_locks()
         # print(f'Unlocking table "{table_name}"')
 
-    def is_locked(self, table_name):
+    def unlock_row(self, table_name, lock_type, index):
         '''
-        Check whether the specified table is exclusivelly locked (X)
+        Unlocks the specified row (with the help of the index parameter) that is exclusively locked (X) or shared locked (S)
 
         table_name -> table's name (needs to exist in database)
+        lock_type -> checks for the lock type of the table
         '''
-        if table_name[:4]=='meta':  # meta tables will never be locked (they are internal)
+        if lock_type == 'exclusive':
+            res_row_exclusive = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowX[0]
+            # if the row is exclusively locked, it gets deleted from the dictionary of the meta_locks table.
+            if index in res_row_exclusive:
+                del res_row_exclusive[index]
+            else:
+                print(f'No shared locks found on {table_name} for row "{index}"')
+        elif lock_type == 'shared':
+            res_row_shared = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowS[0]
+            # if index(row to be unlocked) is not in res_row_shared (pointer to the dictionary of shared lock rows in
+            # 'meta_locks' equals '0', that means  shared locks don't exist in the row
+            if index not in res_row_shared:
+                print(f'No shared locks found on {table_name} for row "{index}"')
+                return
+            elif res_row_shared[index] > 0:
+                # else the number of shared locks on the row is decremented by one
+                res_row_shared[index] -= 1
+                if res_row_shared[index] == 0:
+                    # if the number of res_row_shared[index] equals 0 (no shared locks on the row)
+                    # delete the entry from the dictionary
+                    del res_row_shared[index]
+        self._save_locks()
+
+    def is_locked(self, table_name, lock_type):
+        '''
+        Check whether the specified table EITHER is exclusively locked (X) or shared locked (S)
+        OR check whether a row of the table is exclusively locked or shared locked
+
+        table_name -> table's name (needs to exist in database)
+        lock_type -> checks for the lock type of the table ( table wide (X)/(S) , row wide (X)/(S)
+        '''
+        if table_name[:4] == 'meta':  # meta tables will never be locked (they are internal)
             return False
 
         with open(f'{self.savedir}/meta_locks.pkl', 'rb') as f:
@@ -424,10 +558,28 @@ class Database:
             self.meta_locks = self.tables['meta_locks']
 
         try:
-            res = self.select('meta_locks', ['locked'], f'table_name=={table_name}', return_object=True).locked[0]
-            if res:
-                print(f'Table "{table_name}" is currently locked.')
-            return res
+            if lock_type == 'exclusive':
+                res_exclusive = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').exclusive[0]
+                if res_exclusive:
+                    print(f'Table "{table_name}" is currently exclusively locked.')
+                    return res_exclusive
+            elif lock_type == "shared":
+                res_shared = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').shared[0]
+                if res_shared != 0:
+                    print(f'Table "{table_name}" is currently shared locked.')
+                    return True
+            elif lock_type == "row_locked_X":
+                res_row_exclusive = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowX[0]
+                for key in res_row_exclusive:
+                    if res_row_exclusive[key]:
+                        print(f'Table "{table_name}" currently has a row which is exclusively locked.')
+                        return res_row_exclusive
+            elif lock_type == "row_locked_S":
+                res_row_shared = self.tables['meta_locks']._select_where('*', f'table_name=={table_name}').rowS[0]
+                for key in res_row_shared:
+                    if res_row_shared[key] != 0:
+                        print(f'Table "{table_name}" currently has a row which is shared locked.')
+                        return True
 
         except IndexError:
             return
@@ -443,9 +595,9 @@ class Database:
         updates the meta_length table.
         '''
         for table in self.tables.values():
-            if table._name[:4]=='meta': #skip meta tables
+            if table._name[:4] == 'meta':  # skip meta tables
                 continue
-            if table._name not in self.meta_length.table_name: # if new table, add record with 0 no. of rows
+            if table._name not in self.meta_length.table_name:  # if new table, add record with 0 no. of rows
                 self.tables['meta_length']._insert([table._name, 0])
 
             # the result needs to represent the rows that contain data. Since we use an insert_stack
@@ -459,11 +611,10 @@ class Database:
         updates the meta_locks table
         '''
         for table in self.tables.values():
-            if table._name[:4]=='meta': #skip meta tables
+            if table._name[:4] == 'meta':  # skip meta tables
                 continue
             if table._name not in self.meta_locks.table_name:
-
-                self.tables['meta_locks']._insert([table._name, False])
+                self.tables['meta_locks']._insert([table._name, False, 0, {}, {}])
                 # self.insert('meta_locks', [table._name, False])
 
     def _update_meta_insert_stack(self):
@@ -471,11 +622,10 @@ class Database:
         updates the meta_insert_stack table
         '''
         for table in self.tables.values():
-            if table._name[:4]=='meta': #skip meta tables
+            if table._name[:4] == 'meta':  # skip meta tables
                 continue
             if table._name not in self.meta_insert_stack.table_name:
                 self.tables['meta_insert_stack']._insert([table._name, []])
-
 
     def _add_to_insert_stack(self, table_name, indexes):
         '''
@@ -485,7 +635,7 @@ class Database:
         indexes -> The list of indexes that will be added to the insert stack (the indexes of the newly deleted elements)
         '''
         old_lst = self._get_insert_stack_for_table(table_name)
-        self._update_meta_insert_stack_for_tb(table_name, old_lst+indexes)
+        self._update_meta_insert_stack_for_tb(table_name, old_lst + indexes)
 
     def _get_insert_stack_for_table(self, table_name):
         '''
@@ -506,7 +656,6 @@ class Database:
         '''
         self.tables['meta_insert_stack']._update_row(new_stack, 'indexes', f'table_name=={table_name}')
 
-
     # indexes
     def create_index(self, table_name, index_name, index_type='Btree'):
         '''
@@ -516,12 +665,12 @@ class Database:
         table_name -> table's name (needs to exist in database)
         index_name -> name of the created index
         '''
-        if self.tables[table_name].pk_idx is None: # if no primary key, no index
+        if self.tables[table_name].pk_idx is None:  # if no primary key, no index
             print('## ERROR - Cant create index. Table has no primary key.')
             return
         if index_name not in self.tables['meta_indexes'].index_name:
             # currently only btree is supported. This can be changed by adding another if.
-            if index_type=='Btree':
+            if index_type == 'Btree':
                 print('Creating Btree index.')
                 # insert a record with the name of the index and the table on which it's created to the meta_indexes table
                 self.tables['meta_indexes']._insert([table_name, index_name])
@@ -539,14 +688,13 @@ class Database:
         table_name -> table's name (needs to exist in database)
         index_name -> name of the created index
         '''
-        bt = Btree(3) # 3 is arbitrary
+        bt = Btree(3)  # 3 is arbitrary
 
         # for each record in the primary key of the table, insert its value and index to the btree
         for idx, key in enumerate(self.tables[table_name].columns[self.tables[table_name].pk_idx]):
             bt.insert(key, idx)
         # save the btree
         self._save_index(index_name, bt)
-
 
     def _has_index(self, table_name):
         '''

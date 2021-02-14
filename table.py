@@ -37,7 +37,7 @@ class Table:
 
             self._name = name
 
-            if len(column_names)!=len(column_types):
+            if len(column_names) != len(column_types):
                 raise ValueError('Need same number of column names and types.')
 
             self.column_names = column_names
@@ -62,7 +62,6 @@ class Table:
                 self.pk_idx = self.column_names.index(primary_key)
             else:
                 self.pk_idx = None
-
 
             self._update()
 
@@ -169,6 +168,7 @@ class Table:
         print(f"Deleted {len(indexes_to_del)} rows")
         # we have to return the deleted indexes, since they will be appended to the insert_stack
         return indexes_to_del
+
 
 
     def _select_where(self, return_columns, condition=None, order_by=None, asc=False, top_k=None):
